@@ -1,0 +1,6 @@
+c:\users\joakim\documents\visual studio 2015\Projects\Jackbot\Jackbot\bin\Debug\Jackbot.exe.config
+C:\Users\Joakim\Documents\Visual Studio 2015\Projects\Jackbot\Jackbot\bin\Debug\Jackbot.exe
+C:\Users\Joakim\Documents\Visual Studio 2015\Projects\Jackbot\Jackbot\bin\Debug\Jackbot.pdb
+C:\Users\Joakim\Documents\Visual Studio 2015\Projects\Jackbot\Jackbot\obj\Debug\Jackbot.csprojResolveAssemblyReference.cache
+C:\Users\Joakim\Documents\Visual Studio 2015\Projects\Jackbot\Jackbot\obj\Debug\Jackbot.exe
+C:\Users\Joakim\Documents\Visual Studio 2015\Projects\Jackbot\Jackbot\obj\Debug\Jackbot.pdb
