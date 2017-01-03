@@ -13,6 +13,7 @@ using System.Windows.Media;
 using System.IO;
 using System.Drawing;
 using System.Collections.Generic;
+using System.Windows.Forms;
 
 namespace DobotClientDemo
 {
@@ -24,7 +25,6 @@ namespace DobotClientDemo
         private WriteableBitmap colorBitmap;
         private ImageViewer viewer;
         private List<Card> library = new List<Card>();
-        private VideoCapture capture = new VideoCapture();
         private MultiSourceFrameReader reader;
         
         public MainWindow()
@@ -33,6 +33,7 @@ namespace DobotClientDemo
             StartPeriodic();
             StartDobot();
             viewer = new ImageViewer();
+            viewer.SetBounds(0, 0, 1920, 1080);
 
             KinectSensor sensor = KinectSensor.GetDefault();
             ColorFrameReader frameReader = sensor.ColorFrameSource.OpenReader();
@@ -45,6 +46,8 @@ namespace DobotClientDemo
             colorBitmap = new WriteableBitmap(colorFrameDescription.Width, colorFrameDescription.Height, 96.0, 96.0, PixelFormats.Bgr32, null);
             sensor.Open();
 
+            dobotStuff();
+
             Bitmap img = BitmapFromWriteableBitmap(colorBitmap);
             Image<Bgr, Byte> myImage = new Image<Bgr, Byte>(img);
 
@@ -53,22 +56,91 @@ namespace DobotClientDemo
             loadLibrary(CvInvoke.Imread("clubs (2).png"), 3);
             loadLibrary(CvInvoke.Imread("spades (2).png"), 4);
 
-            //System.Windows.Forms.Application.Idle += new EventHandler(NewFrame);
-            Mat image = CvInvoke.Imread("testbild-cropped.png");
-            detectCards(image, 2);
+            //Mat image = CvInvoke.Imread("testbild-cropped.png");
+            //detectCards(myImage.Mat, 1);
 
             viewer.ShowDialog();
 
             Environment.Exit(0);
         }
 
-        private void NewFrame(object sender, EventArgs e)
+        private void dobotStuff()
         {
-            Mat image = capture.QueryFrame();
-            viewer.Image = image;
-            viewer.Update();
-            detectCards(image, 1);
-            
+            PTPJointParams ptpParams;
+            ptpParams.acceleration = new float[4] { 200, 200, 200, 200 };
+            ptpParams.velocity = new float[4] { 200, 200, 200, 200 };
+
+            PTPCoordinateParams ptpCParams;
+            ptpCParams.rAcceleration = 200;
+            ptpCParams.rVelocity = 200;
+            ptpCParams.xyzAcceleration = 200;
+            ptpCParams.xyzVelocity = 200;
+
+            PTPJumpParams ptpJParams;
+            ptpJParams.jumpHeight = 10;
+            ptpJParams.zLimit = 200;
+
+            PTPCommonParams ptpCmParams;
+            ptpCmParams.accelerationRatio = 100;
+            ptpCmParams.velocityRatio = 100;
+
+            UInt64 cmdIndex = 0;
+            WAITCmd wait;
+            wait.timeout = 2000;
+
+            HOMECmd hmcmd = new HOMECmd();
+            DobotDll.SetHOMECmd(ref hmcmd, false, ref cmdIndex);
+            System.Threading.Thread.Sleep(20000);
+            Pose pose = new Pose();
+            DobotDll.GetPose(ref pose);
+            Console.WriteLine(pose.x + ", " + pose.y + ", " + pose.z);
+            DobotDll.SetPTPJointParams(ref ptpParams, false, ref cmdIndex);
+            DobotDll.SetPTPCoordinateParams(ref ptpCParams, false, ref cmdIndex);
+            DobotDll.SetPTPJumpParams(ref ptpJParams, false, ref cmdIndex);
+            DobotDll.SetPTPCommonParams(ref ptpCmParams, false, ref cmdIndex);
+
+            pickNewCard(cmdIndex, wait);
+
+            placeCard(290, 0, cmdIndex);
+
+            pickNewCard(cmdIndex, wait);
+
+            placeCard(200, 0, cmdIndex);
+
+            pickNewCard(cmdIndex, wait);
+
+            placeCard(290, -50, cmdIndex);
+
+            pickNewCard(cmdIndex, wait);
+
+            placeCard(290, -100, cmdIndex);
+        }
+
+        private void placeCard(int x, int y, UInt64 cmdIndex)
+        {
+            moveDobot(x, y, -65, cmdIndex);
+            DobotDll.SetEndEffectorSuctionCup(true, false, true, ref cmdIndex);
+            moveDobot(x, y, -10, cmdIndex);
+        }
+
+        private void pickNewCard(UInt64 cmdIndex, WAITCmd wait)
+        {
+            moveDobot(220, 140, -10, cmdIndex);
+            moveDobot(220, 140, -50, cmdIndex);
+            DobotDll.SetEndEffectorSuctionCup(true, true, true, ref cmdIndex);
+            moveDobot(220, 140, -10, cmdIndex);
+            DobotDll.SetWAITCmd(ref wait, true, ref cmdIndex);
+        }
+
+        private void moveDobot(int x, int y, int z, UInt64 cmdIndex)
+        {
+            PTPCmd ptpCmd;
+            ptpCmd.ptpMode = (byte)PTPMode.PTPMOVLXYZMode;
+            ptpCmd.x = x;
+            ptpCmd.y = y;
+            ptpCmd.z = z;
+            ptpCmd.rHead = 0;
+            DobotDll.SetPTPCmd(ref ptpCmd, true, ref cmdIndex);   
         }
 
         private void detectCards(Mat image, int cardsToDetect)
@@ -154,7 +226,8 @@ namespace DobotClientDemo
                 Mat transform = CvInvoke.GetPerspectiveTransform(points2, points);
                 Mat warp = new Mat();
                 CvInvoke.WarpPerspective(blur, warp, transform, new System.Drawing.Size(800, 800));
-
+                ImageViewer viewer = new ImageViewer(warp);
+                viewer.ShowDialog();
                 Card recognizedCard = null;
                 foreach(var c in library)
                 {
@@ -321,48 +394,6 @@ namespace DobotClientDemo
             }
         }
 
-        private void dobotStuff()
-        {
-            /*PTPJointParams ptpParams;
-            ptpParams.acceleration = new float[4] { 200, 200, 200, 200 };
-            ptpParams.velocity = new float[4] { 200, 200, 200, 200 };
-
-            PTPCoordinateParams ptpCParams;
-            ptpCParams.rAcceleration = 200;
-            ptpCParams.rVelocity = 200;
-            ptpCParams.xyzAcceleration = 200;
-            ptpCParams.xyzVelocity = 200;
-
-            PTPJumpParams ptpJParams;
-            ptpJParams.jumpHeight = 10;
-            ptpJParams.zLimit = 200;
-
-            PTPCommonParams ptpCmParams;
-            ptpCmParams.accelerationRatio = 100;
-            ptpCmParams.velocityRatio = 100;
-
-            Pose pose = new Pose();
-            DobotDll.GetPose(ref pose);
-            Console.WriteLine(pose.x + ", " + pose.y + ", " + pose.z);
-
-            PTPCmd ptpCmd;
-            UInt64 cmdIndex = 0;
-            ptpCmd.ptpMode = (byte) PTPMode.PTPMOVLXYZMode;
-            ptpCmd.x = 260;
-            ptpCmd.y = 0;
-            ptpCmd.z = -30;
-            ptpCmd.rHead = 0;
-
-            HOMECmd hmcmd = new HOMECmd();
-            DobotDll.SetHOMECmd(ref hmcmd, false, ref cmdIndex);
-            DobotDll.SetPTPJointParams(ref ptpParams, false, ref cmdIndex);
-            DobotDll.SetPTPCoordinateParams(ref ptpCParams, false, ref cmdIndex);
-            DobotDll.SetPTPJumpParams(ref ptpJParams, false, ref cmdIndex);
-            DobotDll.SetPTPCommonParams(ref ptpCmParams, false, ref cmdIndex);
-
-            DobotDll.SetPTPCmd(ref ptpCmd, false, ref cmdIndex);*/
-        }
-
         private System.Drawing.Bitmap BitmapFromWriteableBitmap(WriteableBitmap writeBmp)
         {
             System.Drawing.Bitmap bmp;
@@ -397,8 +428,10 @@ namespace DobotClientDemo
                             switch (body.HandRightState)
                             {
                                 case HandState.Open:
+                                    Console.WriteLine("open");
                                     break;
                                 case HandState.Closed:
+                                    Console.WriteLine("closed");
                                     break;
                                 case HandState.Lasso:
                                     break;
@@ -458,7 +491,11 @@ namespace DobotClientDemo
 
                         this.colorBitmap.Unlock();
 
-                        //viewer.Image = image;
+                        //Bitmap img = BitmapFromWriteableBitmap(colorBitmap);
+                        //Image<Bgr, Byte> myImage = new Image<Bgr, Byte>(img);
+                        //var cropped = myImage.GetSubRect(new Rectangle(800, 800, 400, 280)).Rotate(90, new Bgr());
+                        //detectCards(cropped.Mat, 1);
+                        //viewer.Image = cropped;
                         //viewer.Update();
                     }
                 }
