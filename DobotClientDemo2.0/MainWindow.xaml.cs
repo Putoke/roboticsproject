@@ -14,6 +14,11 @@ using System.IO;
 using System.Drawing;
 using System.Collections.Generic;
 using System.Windows.Forms;
+using SpeechColorsWPF;
+using System.Windows.Documents;
+using System.Runtime.InteropServices;
+using Microsoft.Speech.Recognition;
+using Microsoft.Speech.AudioFormat;
 
 namespace DobotClientDemo
 {
@@ -26,7 +31,21 @@ namespace DobotClientDemo
         private ImageViewer viewer;
         private List<Card> library = new List<Card>();
         private MultiSourceFrameReader reader;
-        
+        private int playerCards = 0, dealerCards = 0;
+        private List<Card> cardsOnTable = new List<Card>();
+        private int skipCounter = 0, skipThresh = 100;
+
+        bool isSplit;
+        bool isHit;
+        bool isDouble;
+        bool isStand;
+
+        private KinectAudioStream convertStream = null;
+        private SpeechRecognitionEngine speechEngine = null;
+        private List<Span> recognitionSpans;
+
+        private int cardDistance = -20;
+
         public MainWindow()
         {
             this.Hide();
@@ -36,17 +55,68 @@ namespace DobotClientDemo
             viewer.SetBounds(0, 0, 1920, 1080);
 
             KinectSensor sensor = KinectSensor.GetDefault();
+
+            if (sensor != null)
+            {
+                // open the sensor
+                sensor.Open();
+
+                // grab the audio stream
+                IReadOnlyList<AudioBeam> audioBeamList = sensor.AudioSource.AudioBeams;
+                System.IO.Stream audioStream = audioBeamList[0].OpenInputStream();
+
+                // create the convert stream
+                this.convertStream = new KinectAudioStream(audioStream);
+            }
+            else
+            {
+                // on failure, set the status text
+                //this.statusBarText.Text = Properties.Resources.NoKinectReady;
+                return;
+            }
+
+            RecognizerInfo ri = TryGetKinectRecognizer();
+
+            if (null != ri)
+            {
+                this.speechEngine = new SpeechRecognitionEngine(ri.Id);
+
+                var directions = new Choices();
+                directions.Add(new SemanticResultValue("split", "SPLIT"));
+                directions.Add(new SemanticResultValue("double down", "DOUBLE DOWN"));
+                directions.Add(new SemanticResultValue("hit", "HIT"));
+                directions.Add(new SemanticResultValue("stand", "STAND"));
+                //directions.Add(new SemanticResultValue("blue", "BLUE"));
+                //directions.Add(new SemanticResultValue("orange", "ORANGE"));
+
+                var gb = new GrammarBuilder { Culture = ri.Culture };
+                gb.Append(directions);
+
+                var g = new Grammar(gb);
+
+
+                this.speechEngine.LoadGrammar(g);
+
+
+                this.speechEngine.SpeechRecognized += this.SpeechRecognized;
+                this.speechEngine.SpeechRecognitionRejected += this.SpeechRejected;
+
+                // let the convertStream know speech is going active
+                this.convertStream.SpeechActive = true;
+
+                // For long recognition sessions (a few hours or more), it may be beneficial to turn off adaptation of the acoustic model. 
+                // This will prevent recognition accuracy from degrading over time.
+                ////speechEngine.UpdateRecognizerSetting("AdaptationOn", 0);
+
+                this.speechEngine.SetInputToAudioStream(
+                    this.convertStream, new SpeechAudioFormatInfo(EncodingFormat.Pcm, 16000, 16, 1, 32000, 2, null));
+                this.speechEngine.RecognizeAsync(RecognizeMode.Multiple);
+            }
+
             ColorFrameReader frameReader = sensor.ColorFrameSource.OpenReader();
             frameReader.FrameArrived += Reader_ColorFrameArrived;
-            reader = sensor.OpenMultiSourceFrameReader(FrameSourceTypes.Color |
-                                             FrameSourceTypes.Depth |
-                                             FrameSourceTypes.Infrared |
-                                             FrameSourceTypes.Body);
             FrameDescription colorFrameDescription = sensor.ColorFrameSource.CreateFrameDescription(ColorImageFormat.Bgra);
             colorBitmap = new WriteableBitmap(colorFrameDescription.Width, colorFrameDescription.Height, 96.0, 96.0, PixelFormats.Bgr32, null);
-            sensor.Open();
-
-            dobotStuff();
 
             Bitmap img = BitmapFromWriteableBitmap(colorBitmap);
             Image<Bgr, Byte> myImage = new Image<Bgr, Byte>(img);
@@ -56,12 +126,107 @@ namespace DobotClientDemo
             loadLibrary(CvInvoke.Imread("clubs (2).png"), 3);
             loadLibrary(CvInvoke.Imread("spades (2).png"), 4);
 
+            dobotStuff();
+
             //Mat image = CvInvoke.Imread("testbild-cropped.png");
             //detectCards(myImage.Mat, 1);
 
             viewer.ShowDialog();
 
-            Environment.Exit(0);
+            //Environment.Exit(0);
+        }
+
+        private void SpeechRejected(object sender, SpeechRecognitionRejectedEventArgs e)
+        {
+
+        }
+
+        private void SpeechRecognized(object sender, SpeechRecognizedEventArgs e)
+        {
+            // Speech utterance confidence below which we treat speech as if it hadn't been heard
+            const double ConfidenceThreshold = 0.3;
+
+            // Number of degrees in a right angle.
+            const int DegreesInRightAngle = 90;
+
+            // Number of pixels turtle should move forwards or backwards each time.
+            const int DisplacementAmount = 60;
+
+            if (e.Result.Confidence >= ConfidenceThreshold)
+            {
+                switch (e.Result.Semantics.Value.ToString())
+                {
+                    case "STAND":
+                        if(!isStand)
+                        {
+                            WAITCmd w;
+                            w.timeout = 2000;
+                            pickNewCard(0, w);
+
+                            placeCard(200, dealerCards * cardDistance, 0);
+                            playerCards++;
+                            Environment.Exit(0);
+                        }
+                        Console.WriteLine("stand");
+                        isStand = true;
+                        break;
+
+                    case "DOUBLE DOWN":
+
+                        Console.WriteLine("double down");
+                        isDouble = true;
+                        break;
+
+                    case "SPLIT":
+
+                        Console.WriteLine("split");
+                        isSplit = true;
+                        break;
+                    case "HIT":
+                        if(playerCards<5 && !isStand)
+                        {
+                            WAITCmd wait;
+                            wait.timeout = 1500;
+                            pickNewCard(0, wait);
+
+                            placeCard(290, playerCards * cardDistance, 0);
+                            playerCards++;
+                        }
+                        Console.WriteLine("hit");
+                        isHit = true;
+                        break;
+
+                }
+            }
+        }
+
+        private RecognizerInfo TryGetKinectRecognizer()
+        {
+            IEnumerable<RecognizerInfo> recognizers;
+
+            // This is required to catch the case when an expected recognizer is not installed.
+            // By default - the x86 Speech Runtime is always expected. 
+            try
+            {
+                recognizers = SpeechRecognitionEngine.InstalledRecognizers();
+            }
+            catch (COMException)
+            {
+                return null;
+            }
+
+            foreach (RecognizerInfo recognizer in recognizers)
+            {
+                string value;
+                recognizer.AdditionalInfo.TryGetValue("Kinect", out value);
+                if ("True".Equals(value, StringComparison.OrdinalIgnoreCase) &&
+                    "en-US".Equals(recognizer.Culture.Name, StringComparison.OrdinalIgnoreCase))
+                {
+                    return recognizer;
+                }
+            }
+
+            return null;
         }
 
         private void dobotStuff()
@@ -84,9 +249,9 @@ namespace DobotClientDemo
             ptpCmParams.accelerationRatio = 100;
             ptpCmParams.velocityRatio = 100;
 
-            UInt64 cmdIndex = 0;
             WAITCmd wait;
             wait.timeout = 2000;
+            UInt64 cmdIndex = 0;
 
             HOMECmd hmcmd = new HOMECmd();
             DobotDll.SetHOMECmd(ref hmcmd, false, ref cmdIndex);
@@ -101,34 +266,34 @@ namespace DobotClientDemo
 
             pickNewCard(cmdIndex, wait);
 
-            placeCard(290, 0, cmdIndex);
+            placeCard(290, playerCards * cardDistance, cmdIndex);
+            playerCards++;
 
             pickNewCard(cmdIndex, wait);
 
-            placeCard(200, 0, cmdIndex);
+            placeCard(200, dealerCards * cardDistance, cmdIndex);
+            dealerCards++;
 
             pickNewCard(cmdIndex, wait);
 
-            placeCard(290, -50, cmdIndex);
-
-            pickNewCard(cmdIndex, wait);
-
-            placeCard(290, -100, cmdIndex);
+            placeCard(290, playerCards * cardDistance, cmdIndex);
+            playerCards++;
         }
 
         private void placeCard(int x, int y, UInt64 cmdIndex)
         {
-            moveDobot(x, y, -65, cmdIndex);
+            moveDobot(x, y, 50, cmdIndex);
+            moveDobot(x, y, -70, cmdIndex);
             DobotDll.SetEndEffectorSuctionCup(true, false, true, ref cmdIndex);
-            moveDobot(x, y, -10, cmdIndex);
+            moveDobot(x, y, 50, cmdIndex);
         }
 
         private void pickNewCard(UInt64 cmdIndex, WAITCmd wait)
         {
-            moveDobot(220, 140, -10, cmdIndex);
-            moveDobot(220, 140, -50, cmdIndex);
+            moveDobot(220, 140, 50, cmdIndex);
+            moveDobot(220, 140, -55, cmdIndex);
             DobotDll.SetEndEffectorSuctionCup(true, true, true, ref cmdIndex);
-            moveDobot(220, 140, -10, cmdIndex);
+            moveDobot(220, 140, 50, cmdIndex);
             DobotDll.SetWAITCmd(ref wait, true, ref cmdIndex);
         }
 
@@ -147,6 +312,21 @@ namespace DobotClientDemo
         {
             Mat gray = new Mat(), blur = new Mat(), thresh = new Mat();
             CvInvoke.CvtColor(image, gray, ColorConversion.Bgr2Gray);
+
+            /*
+            Mat binary = new Mat(gray.Size, gray.Depth, gray.NumberOfChannels);
+            for(int i = 0; i < gray.Rows*gray.Cols; ++i) 
+            {
+                if (gray.GetData()[i] > 200)
+                {
+                    binary.GetData()[i] = 201;
+                }
+                else
+                {
+                    binary.GetData()[i] = 0;
+                }
+            }*/
+
             CvInvoke.GaussianBlur(gray, blur, new System.Drawing.Size(1, 1), 1000);
             CvInvoke.Threshold(blur, thresh, 200, 255, ThresholdType.Binary);
             Mat hierarchy = new Mat();
@@ -226,13 +406,13 @@ namespace DobotClientDemo
                 Mat transform = CvInvoke.GetPerspectiveTransform(points2, points);
                 Mat warp = new Mat();
                 CvInvoke.WarpPerspective(blur, warp, transform, new System.Drawing.Size(800, 800));
-                ImageViewer viewer = new ImageViewer(warp);
-                viewer.ShowDialog();
+                //ImageViewer viewer = new ImageViewer(binary);
+                //viewer.ShowDialog();
                 Card recognizedCard = null;
                 foreach(var c in library)
                 {
                     if (recognizedCard == null)
-                        recognizedCard = library[16];
+                        recognizedCard = library[0];
                     Mat diff1 = new Mat(), diff2 = new Mat();
                     CvInvoke.AbsDiff(recognizedCard.GetImage(), warp, diff1);
                     CvInvoke.AbsDiff(c.GetImage(), warp, diff2);
@@ -253,7 +433,13 @@ namespace DobotClientDemo
                         recognizedCard = c;
                     }
                 }
+                //ImageViewer asd = new ImageViewer(recognizedCard.GetImage());
+                //asd.ShowDialog();
                 Console.WriteLine(recognizedCard.GetColor() + ", " + recognizedCard.GetValue());
+                if(cardsOnTable.Count == 0 || (cardsOnTable[cardsOnTable.Count-1].GetColor() == recognizedCard.GetColor() && cardsOnTable[cardsOnTable.Count - 1].GetValue() == recognizedCard.GetValue()))
+                {
+                    cardsOnTable.Add(recognizedCard);
+                }
 
                 foundCards.Add(rect);
             }
@@ -322,6 +508,9 @@ namespace DobotClientDemo
                 points[2] = new System.Drawing.PointF(799, 799);
                 points[3] = new System.Drawing.PointF(0, 799);
 
+                //ImageViewer asd2 = new ImageViewer(thresh);
+                //asd2.ShowDialog();
+
                 for (int j = 0; j < approx.Size && j < 4; ++j)
                 {
                     points2[j] = approx[j];
@@ -344,48 +533,45 @@ namespace DobotClientDemo
                 Mat transform = CvInvoke.GetPerspectiveTransform(points2, points);
                 Mat warp = new Mat();
                 CvInvoke.WarpPerspective(blur, warp, transform, new System.Drawing.Size(800, 800));
-
-                //ImageViewer asd = new ImageViewer(warp);
-                //asd.ShowDialog();
-                switch(i)
+                switch(numCards)
                 {
-                    case 0:
+                    case 1:
                         library.Add(new Card(warp, color, 10));
                         break;
-                    case 1:
+                    case 2:
                         library.Add(new Card(warp, color, 11));
                         break;
-                    case 2:
+                    case 3:
                         library.Add(new Card(warp, color, 12));
                         break;
-                    case 3:
+                    case 4:
                         library.Add(new Card(warp, color, 13));
                         break;
-                    case 4:
+                    case 5:
                         library.Add(new Card(warp, color, 5));
                         break;
-                    case 5:
+                    case 6:
                         library.Add(new Card(warp, color, 6));
                         break;
-                    case 6:
-                        library.Add(new Card(warp, color, 7));
-                        break;
                     case 7:
-                        library.Add(new Card(warp, color, 9));
+                        library.Add(new Card(warp, color, 7));
                         break;
                     case 8:
                         library.Add(new Card(warp, color, 8));
                         break;
                     case 9:
-                        library.Add(new Card(warp, color, 14));
+                        library.Add(new Card(warp, color, 9));
                         break;
                     case 10:
-                        library.Add(new Card(warp, color, 2));
+                        library.Add(new Card(warp, color, 1));
                         break;
                     case 11:
-                        library.Add(new Card(warp, color, 3));
+                        library.Add(new Card(warp, color, 2));
                         break;
                     case 12:
+                        library.Add(new Card(warp, color, 3));
+                        break;
+                    case 13:
                         library.Add(new Card(warp, color, 4));
                         break;
                 }
@@ -405,64 +591,6 @@ namespace DobotClientDemo
                 bmp = new System.Drawing.Bitmap(outStream);
             }
             return bmp;
-        }
-
-        private void Reader_MultiSourceFramearrived(object sender, MultiSourceFrameArrivedEventArgs e)
-        {
-            var reference = e.FrameReference.AcquireFrame();
-
-            using (var frame = reference.BodyFrameReference.AcquireFrame())
-            {
-                if (frame != null)
-                {
-                    var bodies = new Body[frame.BodyFrameSource.BodyCount];
-                    frame.GetAndRefreshBodyData(bodies);
-
-                    foreach(var body in bodies)
-                    {
-                        if(body.IsTracked)
-                        {
-                            Joint rightHand = body.Joints[JointType.HandRight];
-                            Joint leftHand = body.Joints[JointType.HandLeft];
-                            // Find the right hand state
-                            switch (body.HandRightState)
-                            {
-                                case HandState.Open:
-                                    Console.WriteLine("open");
-                                    break;
-                                case HandState.Closed:
-                                    Console.WriteLine("closed");
-                                    break;
-                                case HandState.Lasso:
-                                    break;
-                                case HandState.Unknown:
-                                    break;
-                                case HandState.NotTracked:
-                                    break;
-                                default:
-                                    break;
-                            }
-
-                            // Find the left hand state
-                            switch (body.HandLeftState)
-                            {
-                                case HandState.Open:
-                                    break;
-                                case HandState.Closed:
-                                    break;
-                                case HandState.Lasso:
-                                    break;
-                                case HandState.Unknown:
-                                    break;
-                                case HandState.NotTracked:
-                                    break;
-                                default:
-                                    break;
-                            }
-                        }
-                    }
-                }
-            }
         }
 
         private void Reader_ColorFrameArrived(object sender, ColorFrameArrivedEventArgs e)
@@ -491,12 +619,17 @@ namespace DobotClientDemo
 
                         this.colorBitmap.Unlock();
 
-                        //Bitmap img = BitmapFromWriteableBitmap(colorBitmap);
-                        //Image<Bgr, Byte> myImage = new Image<Bgr, Byte>(img);
-                        //var cropped = myImage.GetSubRect(new Rectangle(800, 800, 400, 280)).Rotate(90, new Bgr());
-                        //detectCards(cropped.Mat, 1);
-                        //viewer.Image = cropped;
-                        //viewer.Update();
+                        skipCounter++;
+                        if(skipCounter > skipThresh)
+                        {
+                            Bitmap img = BitmapFromWriteableBitmap(colorBitmap);
+                            Image<Bgr, Byte> myImage = new Image<Bgr, Byte>(img);
+                            var cropped = myImage.GetSubRect(new Rectangle(1100, 600, 600, 480)).Rotate(90, new Bgr());
+                            detectCards(cropped.Mat, 1);
+                            skipCounter = 0;
+                            viewer.Image = cropped;
+                            viewer.Update();
+                        }
                     }
                 }
             }
